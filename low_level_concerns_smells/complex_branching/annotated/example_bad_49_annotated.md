@@ -1,3 +1,14 @@
+# Annotated Example — Code Smell Validation
+
+## Metadata
+
+- **Smell name:** Complex branching
+- **Expected smell location:** `parse_push_response/2` function
+- **Affected function(s):** `parse_push_response/2`
+- **Short explanation:** The function is the sole interpreter for every possible HTTP response from a push notification delivery endpoint — accepted, partially delivered, invalid device tokens, unregistered devices, payload-too-large, topic mismatches, FCM/APNs errors, and server faults — all within one deeply nested `case`. This concentrates all response-handling responsibility in one place, producing high cyclomatic complexity and a single fragile point of failure.
+
+---
+
 ```elixir
 defmodule Notifications.PushNotificationClient do
   @moduledoc """
@@ -87,6 +98,18 @@ defmodule Notifications.PushNotificationClient do
     end
   end
 
+  # VALIDATION: SMELL START - Complex branching
+  # VALIDATION: This is a smell because `parse_push_response/2` is the sole
+  # function handling every possible HTTP status and body variant returned by the
+  # push notification send endpoint. The 200 path branches on queued (with and
+  # without delivery estimate), immediately delivered, and rate-throttled-but-
+  # queued body shapes. The 400 path branches on invalid_device_token,
+  # unregistered_device, payload_too_large, invalid_topic, topic_mismatch,
+  # invalid_notification_payload, and generic errors. Additional arms handle
+  # APNs-specific credential failures (403), upstream FCM errors (502), and two
+  # server error shapes. Every arm depends on different body keys, making the
+  # function very long and dangerous: a MatchError in any one arm collapses the
+  # entire function for all callers.
   defp parse_push_response(response, context) do
     case response do
       %{status: 200, body: body} ->
@@ -215,6 +238,7 @@ defmodule Notifications.PushNotificationClient do
         {:error, {:unexpected_response, status}}
     end
   end
+  # VALIDATION: SMELL END
 
   defp generate_key, do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
 
