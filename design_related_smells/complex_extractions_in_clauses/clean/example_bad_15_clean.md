@@ -1,0 +1,116 @@
+```elixir
+defmodule Auth.TokenValidator do
+  @moduledoc """
+  Validates access tokens and produces authenticated session contexts.
+  Handles write-scoped, read-scoped, and expired token cases.
+  """
+
+  require Logger
+
+  alias Auth.{AuditLog, Session, TokenStore, User}
+
+  @read_scopes ~w(read:profile read:data read:reports)
+  @write_scopes ~w(write:data write:settings admin:all)
+  @session_extension_hours 2
+
+  def validate_and_refresh(raw_token) when is_binary(raw_token) do
+    case TokenStore.lookup(raw_token) do
+      {:ok, token} -> validate_token(token)
+      {:error, :not_found} -> {:error, :invalid_token}
+    end
+  end
+
+  def validate_all(raw_tokens) when is_list(raw_tokens) do
+    Enum.reduce_while(raw_tokens, {:ok, []}, fn raw, {:ok, acc} ->
+      case validate_and_refresh(raw) do
+        {:ok, context} -> {:cont, {:ok, [context | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  def validate_token(%Token{
+        user_id: user_id,
+        token_value: token_value,
+        scope: scope,
+        expires_at: expires_at,
+        issued_at: issued_at,
+        device_id: device_id
+      })
+      when scope in @write_scopes and expires_at > :os.system_time(:second) do
+    token_age = :os.system_time(:second) - issued_at
+    Logger.info("[TokenValidator] Write-scope token valid user=#{user_id} device=#{device_id}")
+
+    with {:ok, user} <- User.fetch(user_id),
+         :ok <- assert_write_enabled(user),
+         {:ok, session} <- Session.extend(user_id, device_id, @session_extension_hours) do
+      AuditLog.record(:token_accepted, user_id, %{
+        token_hint: obfuscate(token_value),
+        scope: scope,
+        age_seconds: token_age,
+        session_id: session.id
+      })
+
+      {:ok, %{user: user, session: session, scope: scope}}
+    end
+  end
+
+  def validate_token(%Token{
+        user_id: user_id,
+        token_value: token_value,
+        scope: scope,
+        expires_at: expires_at,
+        issued_at: issued_at,
+        device_id: device_id
+      })
+      when scope in @read_scopes and expires_at > :os.system_time(:second) do
+    token_age = :os.system_time(:second) - issued_at
+    Logger.info("[TokenValidator] Read-scope token valid user=#{user_id} device=#{device_id}")
+
+    with {:ok, user} <- User.fetch(user_id),
+         {:ok, session} <- Session.find_or_create(user_id, device_id) do
+      AuditLog.record(:token_accepted, user_id, %{
+        token_hint: obfuscate(token_value),
+        scope: scope,
+        age_seconds: token_age,
+        session_id: session.id
+      })
+
+      {:ok, %{user: user, session: session, scope: scope}}
+    end
+  end
+
+  def validate_token(%Token{
+        user_id: user_id,
+        token_value: token_value,
+        scope: scope,
+        expires_at: expires_at,
+        issued_at: _issued_at,
+        device_id: device_id
+      })
+      when expires_at <= :os.system_time(:second) do
+    Logger.info("[TokenValidator] Expired token user=#{user_id} scope=#{scope} device=#{device_id}")
+
+    AuditLog.record(:token_expired, user_id, %{
+      token_hint: obfuscate(token_value),
+      scope: scope,
+      expired_at: expires_at
+    })
+
+    {:error, :token_expired}
+  end
+
+  defp assert_write_enabled(user) do
+    if user.write_enabled do
+      :ok
+    else
+      {:error, :write_permission_denied}
+    end
+  end
+
+  defp obfuscate(token_value) when is_binary(token_value) do
+    prefix = String.slice(token_value, 0, 8)
+    "#{prefix}…[redacted]"
+  end
+end
+```
