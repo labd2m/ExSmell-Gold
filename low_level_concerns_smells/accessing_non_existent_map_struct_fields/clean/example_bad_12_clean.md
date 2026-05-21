@@ -1,14 +1,3 @@
-# Annotated Example 12
-
-## Metadata
-
-- **Smell name:** Accessing non-existent Map/Struct fields
-- **Expected smell location:** `Payments.GatewayRouter.route/2`, lines where `payment` map keys are accessed dynamically
-- **Affected function(s):** `route/2`
-- **Short explanation:** `payment[:amount]`, `payment[:currency]`, `payment[:method]`, and `payment[:metadata]` use dynamic bracket access on a plain map. If `:amount` is absent, `nil` is compared against numeric thresholds, silently producing incorrect routing decisions. A missing `:method` also causes `nil` to flow into pattern-match routing, falling through to an unintended gateway without any error.
-
----
-
 ```elixir
 defmodule Payments.GatewayRouter do
   @moduledoc """
@@ -26,21 +15,11 @@ defmodule Payments.GatewayRouter do
 
   @spec route(payment(), map()) :: {:ok, gateway()} | {:error, String.t()}
   def route(payment, merchant_config) do
-    # VALIDATION: SMELL START - Accessing non-existent Map/Struct fields
-    # VALIDATION: This is a smell because `payment[:amount]`,
-    # `payment[:currency]`, `payment[:method]`, and `payment[:metadata]` use
-    # dynamic bracket access on a plain map. If `:amount` is absent, `nil`
-    # is passed to the `>=` comparison inside `high_value?/1`, which evaluates
-    # to `false` instead of raising an error, silently routing large payments
-    # through the wrong gateway. A missing `:method` produces `nil`, which
-    # falls through `select_gateway/3` pattern matches to a default branch
-    # rather than surfacing a configuration error.
     amount   = payment[:amount]
     currency = payment[:currency]
     method   = payment[:method]
     metadata = payment[:metadata]
-    # VALIDATION: SMELL END
-
+    
     with :ok <- validate_currency(currency),
          :ok <- validate_amount(amount) do
       gateway = select_gateway(method, currency, merchant_config, amount)
