@@ -1,0 +1,153 @@
+```elixir
+defmodule MyApp.Payments.PaymentProcessor do
+  @moduledoc """
+  Handles payment charges, refunds, and dispute management.
+  Wraps the Stripe API and persists all transaction records locally
+  for reconciliation and auditing purposes.
+  """
+
+  alias MyApp.Repo
+  alias MyApp.Payments.{Transaction, Refund, PaymentMethod}
+  alias MyApp.Accounts.Account
+
+  require Logger
+
+  @supported_currencies ~w(usd eur gbp brl)
+
+  @doc """
+  Retrieves a saved payment method for an account.
+
+  Returns `{:ok, payment_method}` or `{:error, :not_found}`.
+  """
+  def get_payment_method(account_id) do
+    case Repo.get_by(PaymentMethod, account_id: account_id, active: true) do
+      nil -> {:error, :not_found}
+      pm -> {:ok, pm}
+    end
+  end
+
+  # Charges a saved payment method for the given account.
+  #
+  # Parameters:
+  #   account_id - integer ID of the account being charged.
+  #   amount_cents - positive integer representing the charge amount in the smallest
+  #                  currency unit (e.g. cents for USD).
+  #   opts - keyword list of options:
+  #     :currency (string, default "usd") - ISO 4217 currency code.
+  #     :description (string) - human-readable charge description for the statement.
+  #     :metadata (map) - arbitrary key-value pairs forwarded to the gateway.
+  #     :idempotency_key (string) - optional idempotency key for safe retries.
+  #
+  # Fetches the account's active PaymentMethod, calls the Stripe charge endpoint,
+  # and persists a Transaction record regardless of outcome.
+  #
+  # Returns {:ok, transaction} on success or {:error, reason} on failure.
+  def charge(account_id, amount_cents, opts \\ []) do
+    currency = Keyword.get(opts, :currency, "usd")
+    description = Keyword.get(opts, :description, "MyApp charge")
+    metadata = Keyword.get(opts, :metadata, %{})
+    idempotency_key = Keyword.get(opts, :idempotency_key)
+
+    with :ok <- validate_currency(currency),
+         :ok <- validate_amount(amount_cents),
+         {:ok, payment_method} <- get_payment_method(account_id) do
+      stripe_params = %{
+        amount: amount_cents,
+        currency: currency,
+        customer: payment_method.stripe_customer_id,
+        payment_method: payment_method.stripe_pm_id,
+        description: description,
+        metadata: metadata,
+        confirm: true
+      }
+
+      stripe_params =
+        if idempotency_key,
+          do: Map.put(stripe_params, :idempotency_key, idempotency_key),
+          else: stripe_params
+
+      result = Stripe.Charge.create(stripe_params)
+      persist_transaction(account_id, amount_cents, currency, result)
+    end
+  end
+
+  @doc """
+  Issues a full or partial refund for a completed transaction.
+
+  ## Parameters
+
+    - `transaction_id` – the local transaction ID to refund.
+    - `amount_cents` – the amount to refund; must not exceed the original charge.
+
+  ## Returns
+
+  `{:ok, refund}` or `{:error, reason}`.
+  """
+  def refund(transaction_id, amount_cents) do
+    with {:ok, txn} <- fetch_chargeable_transaction(transaction_id),
+         :ok <- validate_refund_amount(txn, amount_cents) do
+      case Stripe.Refund.create(%{charge: txn.gateway_ref, amount: amount_cents}) do
+        {:ok, stripe_refund} ->
+          %Refund{}
+          |> Refund.changeset(%{
+            transaction_id: txn.id,
+            amount_cents: amount_cents,
+            gateway_ref: stripe_refund.id,
+            status: :succeeded
+          })
+          |> Repo.insert()
+
+        {:error, %Stripe.Error{} = err} ->
+          Logger.error("Stripe refund failed", error: err.message, transaction_id: transaction_id)
+          {:error, :gateway_error}
+      end
+    end
+  end
+
+  # --- Private helpers ---
+
+  defp validate_currency(c) when c in @supported_currencies, do: :ok
+  defp validate_currency(_), do: {:error, :unsupported_currency}
+
+  defp validate_amount(a) when is_integer(a) and a > 0, do: :ok
+  defp validate_amount(_), do: {:error, :invalid_amount}
+
+  defp validate_refund_amount(%Transaction{amount_cents: original}, refund) when refund <= original and refund > 0,
+    do: :ok
+  defp validate_refund_amount(_, _), do: {:error, :invalid_refund_amount}
+
+  defp fetch_chargeable_transaction(id) do
+    case Repo.get(Transaction, id) do
+      %Transaction{status: :succeeded} = txn -> {:ok, txn}
+      nil -> {:error, :not_found}
+      _ -> {:error, :transaction_not_chargeable}
+    end
+  end
+
+  defp persist_transaction(account_id, amount_cents, currency, {:ok, stripe_charge}) do
+    attrs = %{
+      account_id: account_id,
+      amount_cents: amount_cents,
+      currency: currency,
+      gateway_ref: stripe_charge.id,
+      status: :succeeded
+    }
+
+    Transaction.changeset(%Transaction{}, attrs) |> Repo.insert()
+  end
+
+  defp persist_transaction(account_id, amount_cents, currency, {:error, err}) do
+    attrs = %{
+      account_id: account_id,
+      amount_cents: amount_cents,
+      currency: currency,
+      status: :failed,
+      failure_message: inspect(err)
+    }
+
+    Logger.error("Charge failed", account_id: account_id, error: inspect(err))
+    Transaction.changeset(%Transaction{}, attrs) |> Repo.insert()
+    {:error, :payment_failed}
+  end
+end
+```
