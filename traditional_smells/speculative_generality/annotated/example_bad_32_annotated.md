@@ -1,0 +1,106 @@
+# Annotated Example — Speculative Generality
+
+## Metadata
+
+- **Smell name:** Speculative Generality
+- **Expected smell location:** `apply_cross_border_surcharge/2` in `Payments.ChargeBuilder`
+- **Affected function(s):** `apply_cross_border_surcharge/2`
+- **Short explanation:** `apply_cross_border_surcharge/2` was written speculatively to add a surcharge to charges that cross currency jurisdictions. The function is fully implemented but is never called by `build/1` or any other function in the module or codebase. All charges are assembled without a cross-border surcharge because the requirement was deferred and the calling site was never added.
+
+---
+
+```elixir
+defmodule Payments.ChargeBuilder do
+  @moduledoc """
+  Constructs the full charge payload for a payment transaction,
+  combining the base amount, applicable taxes, platform fees,
+  and metadata required by the downstream payment gateway.
+  """
+
+  alias Payments.{Transaction, TaxCalculator, PlatformFee, GatewayPayload}
+
+  require Logger
+
+  @platform_fee_rate 0.015
+  @minimum_charge_cents 50
+
+  @spec build(Transaction.t()) :: {:ok, GatewayPayload.t()} | {:error, atom()}
+  def build(%Transaction{} = txn) do
+    with :ok <- validate_transaction(txn),
+         {:ok, tax} <- TaxCalculator.compute(txn),
+         {:ok, platform_fee} <- compute_platform_fee(txn),
+         {:ok, payload} <- assemble_payload(txn, tax, platform_fee) do
+      Logger.debug("Built charge payload txn=#{txn.id} total=#{payload.total_cents}")
+      {:ok, payload}
+    end
+  end
+
+  defp assemble_payload(%Transaction{} = txn, tax, platform_fee) do
+    base_cents = dollars_to_cents(txn.amount)
+    tax_cents = dollars_to_cents(tax.amount)
+    fee_cents = dollars_to_cents(platform_fee)
+    total_cents = base_cents + tax_cents + fee_cents
+
+    if total_cents < @minimum_charge_cents do
+      {:error, :charge_below_minimum}
+    else
+      payload = %GatewayPayload{
+        idempotency_key: txn.id,
+        amount_cents: total_cents,
+        currency: txn.currency,
+        customer_id: txn.customer_id,
+        payment_method_id: txn.payment_method_id,
+        description: txn.description,
+        metadata: %{
+          platform_fee_cents: fee_cents,
+          tax_cents: tax_cents,
+          tax_jurisdiction: tax.jurisdiction
+        }
+      }
+
+      {:ok, payload}
+    end
+  end
+
+  defp compute_platform_fee(%Transaction{amount: amount}) do
+    fee = Float.round(amount * @platform_fee_rate, 2)
+    {:ok, fee}
+  end
+
+  # VALIDATION: SMELL START - Speculative Generality
+  # VALIDATION: This is a smell because `apply_cross_border_surcharge/2` is a 
+  # fully implemented private function that is never called anywhere in this module 
+  # or the codebase. It was written speculatively to handle cross-border currency 
+  # surcharges that were planned but deferred. Since `build/1` never invokes it, the 
+  # function is dead speculative code that adds noise to the module.
+  defp apply_cross_border_surcharge(
+         %GatewayPayload{currency: charge_currency} = payload,
+         issuer_currency
+       )
+       when charge_currency != issuer_currency do
+    surcharge_cents = round(payload.amount_cents * 0.01)
+
+    %{payload
+      | amount_cents: payload.amount_cents + surcharge_cents,
+        metadata: Map.put(payload.metadata, :cross_border_surcharge_cents, surcharge_cents)}
+  end
+
+  defp apply_cross_border_surcharge(payload, _issuer_currency), do: payload
+  # VALIDATION: SMELL END
+
+  defp validate_transaction(%Transaction{amount: amount}) when amount <= 0,
+    do: {:error, :invalid_amount}
+
+  defp validate_transaction(%Transaction{customer_id: nil}),
+    do: {:error, :missing_customer}
+
+  defp validate_transaction(%Transaction{payment_method_id: nil}),
+    do: {:error, :missing_payment_method}
+
+  defp validate_transaction(_txn), do: :ok
+
+  defp dollars_to_cents(amount) do
+    round(amount * 100)
+  end
+end
+```
