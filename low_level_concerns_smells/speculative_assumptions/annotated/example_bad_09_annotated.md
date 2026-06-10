@@ -49,8 +49,6 @@ defmodule Auth.BearerTokenExtractor do
   # VALIDATION: as if it were a valid Bearer token. Similarly, "Bearer  token" (two
   # VALIDATION: spaces) returns {:ok, ""} and "Bearer" with no token returns {:ok, nil}.
   # VALIDATION: None of these cases crash; they all silently produce an incorrect result.
-  def extract_token(authorization_header)
-
   def extract_token(nil), do: {:error, :missing_authorization_header}
 
   def extract_token(header) when is_binary(header) do
