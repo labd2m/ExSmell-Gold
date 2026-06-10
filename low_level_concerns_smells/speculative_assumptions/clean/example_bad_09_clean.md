@@ -25,8 +25,6 @@ defmodule Auth.BearerTokenExtractor do
   is missing, malformed, or uses an unsupported authentication scheme.
   """
 
-  def extract_token(authorization_header)
-
   def extract_token(nil), do: {:error, :missing_authorization_header}
 
   def extract_token(header) when is_binary(header) do
