@@ -68,7 +68,7 @@ The goal of ExSmell-Gold is to provide a publicly available benchmark for:
 
 A representative subset of the dataset was manually reviewed by two researchers.
 
-The validation process confirmed a high level of agreement regarding the presence and classification of smells. During the review process, additional smells identified in some examples were also documented.
+The validation process confirmed a high level of agreement regarding the presence and classification of smells.
 
 For the non-smelly subset, a statistical validation was performed using a representative sample. After correcting the identified issues, the subset achieved an estimated correctness of approximately **97.4%**, considering a **90% confidence level** and a **5% margin of error**.
 
