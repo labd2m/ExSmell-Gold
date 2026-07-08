@@ -44,7 +44,7 @@ defmodule ExSmellGold.Mixfile do
   defp package do
     [
       name: :ex_smell_gold,
-      maintainers: ["Lucas Vegi", "Mateus Dias"],
+      maintainers: ["A1", "A2"],
       licenses: ["MIT-License"],
       links: %{
         "GitHub" => @source_url
